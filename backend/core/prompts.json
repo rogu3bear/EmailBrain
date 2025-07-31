@@ -1,0 +1,5 @@
+{
+  "summarize_email": "Summarize this email:\n\n{{email_text}}",
+  "extract_todos": "List all action items:\n\n{{email_text}}",
+  "thread_timeline": "Create a dated timeline for this thread:\n\n{{thread_text}}"
+}
