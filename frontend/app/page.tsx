@@ -1,27 +1,47 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import EmailList from '../components/EmailList';
 import EmailDetail from '../components/EmailDetail';
 import AdapterList from '../components/AdapterList';
 import ChatInterface from '../components/ChatInterface';
 import { Email, Adapter } from '../lib/types';
+import { API_BASE_URL } from '../lib/api';
+import { formatEndpointLabel } from '../lib/format';
 
 export default function HomePage() {
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [selectedAdapter, setSelectedAdapter] = useState<Adapter | null>(null);
   const [activeTab, setActiveTab] = useState<'emails' | 'adapters' | 'chat'>('emails');
+  const [frontendOrigin, setFrontendOrigin] = useState('Current origin');
 
-  const handleEmailSelect = (email: Email) => {
+  const handleEmailSelect = useCallback((email: Email) => {
     setSelectedEmail(email);
-  };
+  }, []);
 
-  const handleAdapterSelect = (adapter: Adapter) => {
+  const handleAdapterSelect = useCallback((adapter: Adapter | null) => {
     setSelectedAdapter(adapter);
-  };
+  }, []);
 
-  const handleBackToList = () => {
+  const handleBackToList = useCallback(() => {
     setSelectedEmail(null);
+  }, []);
+
+  const clearSelectedAdapter = useCallback(() => {
+    setSelectedAdapter(null);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setFrontendOrigin(window.location.origin);
+    }
+  }, []);
+
+  const handleTabChange = (nextTab: 'emails' | 'adapters' | 'chat') => {
+    setActiveTab(nextTab);
+    if (nextTab !== 'emails') {
+      setSelectedEmail(null);
+    }
   };
 
   return (
@@ -39,11 +59,22 @@ export default function HomePage() {
             <div className="flex items-center space-x-4">
               <div className="text-sm text-gray-500">
                 {selectedAdapter ? (
-                  <span>Adapter: <strong>{selectedAdapter.name}</strong></span>
+                  <span>
+                    Adapter: <strong>{selectedAdapter.name}</strong>
+                  </span>
                 ) : (
                   <span>No adapter selected</span>
                 )}
               </div>
+              {selectedAdapter && (
+                <button
+                  type="button"
+                  onClick={clearSelectedAdapter}
+                  className="rounded bg-gray-100 px-3 py-2 text-sm text-gray-700 hover:bg-gray-200"
+                >
+                  Clear adapter
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -54,7 +85,8 @@ export default function HomePage() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex space-x-8">
             <button
-              onClick={() => setActiveTab('emails')}
+              type="button"
+              onClick={() => handleTabChange('emails')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === 'emails'
                   ? 'border-blue-500 text-blue-600'
@@ -64,7 +96,8 @@ export default function HomePage() {
               Emails
             </button>
             <button
-              onClick={() => setActiveTab('adapters')}
+              type="button"
+              onClick={() => handleTabChange('adapters')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === 'adapters'
                   ? 'border-blue-500 text-blue-600'
@@ -74,7 +107,8 @@ export default function HomePage() {
               Adapters
             </button>
             <button
-              onClick={() => setActiveTab('chat')}
+              type="button"
+              onClick={() => handleTabChange('chat')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === 'chat'
                   ? 'border-blue-500 text-blue-600'
@@ -92,7 +126,11 @@ export default function HomePage() {
         {activeTab === 'emails' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
             <div>
-              <EmailList onEmailSelect={handleEmailSelect} />
+              <EmailList
+                onEmailSelect={handleEmailSelect}
+                selectedEmailId={selectedEmail?.id}
+                onSelectionInvalid={handleBackToList}
+              />
             </div>
             <div>
               {selectedEmail ? (
@@ -119,13 +157,17 @@ export default function HomePage() {
             <AdapterList
               onAdapterSelect={handleAdapterSelect}
               selectedAdapterId={selectedAdapter?.id}
+              onSelectionInvalid={clearSelectedAdapter}
             />
           </div>
         )}
 
         {activeTab === 'chat' && (
           <div className="max-w-4xl">
-            <ChatInterface selectedAdapter={selectedAdapter || undefined} />
+            <ChatInterface
+              selectedAdapter={selectedAdapter || undefined}
+              onAdapterInvalid={clearSelectedAdapter}
+            />
           </div>
         )}
       </main>
@@ -136,8 +178,8 @@ export default function HomePage() {
           <div className="flex justify-between items-center text-sm text-gray-500">
             <p>EmailBrain - AI-powered email analysis</p>
             <div className="flex items-center space-x-4">
-              <span>Backend: localhost:8000</span>
-              <span>Frontend: localhost:3000</span>
+              <span>Backend: {formatEndpointLabel(API_BASE_URL)}</span>
+              <span>Frontend: {formatEndpointLabel(frontendOrigin)}</span>
             </div>
           </div>
         </div>

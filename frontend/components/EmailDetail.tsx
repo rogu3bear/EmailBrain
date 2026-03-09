@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Email } from '../lib/types';
 import { apiClient } from '../lib/api';
+import { formatLongDateTime } from '../lib/format';
 
 interface EmailDetailProps {
   emailId: number;
@@ -13,34 +14,48 @@ export default function EmailDetail({ emailId, onBack }: EmailDetailProps) {
   const [email, setEmail] = useState<Email | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const requestIdRef = useRef(0);
 
   useEffect(() => {
-    fetchEmail();
-  }, [emailId]);
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    const abortController = new AbortController();
 
-  const fetchEmail = async () => {
-    try {
-      setLoading(true);
-      const emailData = await apiClient.getEmail(emailId);
-      setEmail(emailData);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch email');
-      console.error('Error fetching email:', err);
-    } finally {
-      setLoading(false);
+    async function loadEmail() {
+      try {
+        setLoading(true);
+        const emailData = await apiClient.getEmail(emailId, abortController.signal);
+        if (abortController.signal.aborted || requestId !== requestIdRef.current) {
+          return;
+        }
+
+        setEmail(emailData);
+        setError(null);
+      } catch (err) {
+        if (abortController.signal.aborted || requestId !== requestIdRef.current) {
+          return;
+        }
+
+        setEmail(null);
+        setError(err instanceof Error ? err.message : 'Failed to fetch email');
+        console.error('Error fetching email:', err);
+      } finally {
+        if (!abortController.signal.aborted && requestId === requestIdRef.current) {
+          setLoading(false);
+        }
+      }
     }
-  };
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    void loadEmail();
+
+    return () => {
+      abortController.abort();
+    };
+  }, [emailId, refreshKey]);
+
+  const refreshEmail = () => {
+    setRefreshKey((value) => value + 1);
   };
 
   if (loading) {
@@ -62,13 +77,15 @@ export default function EmailDetail({ emailId, onBack }: EmailDetailProps) {
             </div>
             <div className="mt-4 space-x-2">
               <button
-                onClick={fetchEmail}
+                type="button"
+                onClick={refreshEmail}
                 className="bg-red-100 hover:bg-red-200 text-red-800 px-3 py-2 rounded text-sm"
               >
                 Try again
               </button>
               {onBack && (
                 <button
+                  type="button"
                   onClick={onBack}
                   className="bg-gray-100 hover:bg-gray-200 text-gray-800 px-3 py-2 rounded text-sm"
                 >
@@ -91,6 +108,7 @@ export default function EmailDetail({ emailId, onBack }: EmailDetailProps) {
         </p>
         {onBack && (
           <button
+            type="button"
             onClick={onBack}
             className="mt-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
           >
@@ -115,6 +133,7 @@ export default function EmailDetail({ emailId, onBack }: EmailDetailProps) {
           </div>
           {onBack && (
             <button
+              type="button"
               onClick={onBack}
               className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded text-sm"
             >
@@ -140,7 +159,7 @@ export default function EmailDetail({ emailId, onBack }: EmailDetailProps) {
           
           <div>
             <dt className="text-sm font-medium text-gray-500">Date</dt>
-            <dd className="mt-1 text-sm text-gray-900">{formatDate(email.date)}</dd>
+            <dd className="mt-1 text-sm text-gray-900">{formatLongDateTime(email.date)}</dd>
           </div>
           
           {email.thread_id && (
@@ -151,18 +170,20 @@ export default function EmailDetail({ emailId, onBack }: EmailDetailProps) {
           )}
         </dl>
         
-        {email.body && (
-          <div className="mt-6">
-            <dt className="text-sm font-medium text-gray-500 mb-2">Content</dt>
-            <dd className="mt-1 text-sm text-gray-900">
-              <div className="bg-gray-50 p-4 rounded-md">
-                <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">
+        <div className="mt-6">
+          <dt className="text-sm font-medium text-gray-500 mb-2">Content</dt>
+          <dd className="mt-1 text-sm text-gray-900">
+            <div className="bg-gray-50 p-4 rounded-md">
+              {email.body ? (
+                <pre className="max-h-96 overflow-auto whitespace-pre-wrap font-sans text-sm leading-relaxed">
                   {email.body}
                 </pre>
-              </div>
-            </dd>
-          </div>
-        )}
+              ) : (
+                <p className="text-gray-500">This email does not include any body content.</p>
+              )}
+            </div>
+          </dd>
+        </div>
       </div>
     </div>
   );

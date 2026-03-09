@@ -64,11 +64,16 @@ lerna-debug.log*
 .yarn/install-state.gz
 .pnp.*
 
+# Rust
+backend/target/
+
 # Next.js
 .next/
 out/
 *.tsbuildinfo
 next-env.d.ts
+!frontend/lib/
+!frontend/lib/*.ts
 
 # Swift/Xcode
 # Xcode

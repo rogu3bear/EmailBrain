@@ -15,16 +15,24 @@ import argparse
 import logging
 import sqlite3
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    DataCollatorForLanguageModeling,
+    Trainer,
+    TrainingArguments,
+)
 from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_training
 from datasets import Dataset
 
-# Add the project root to the Python path to import from backend
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from backend.config import settings
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+MODELS_DIR = os.path.join(SCRIPT_DIR, "models")
+DB_PATH = os.path.join(PROJECT_ROOT, "backend", "db", "mail.db")
 
 # Configure logging
 logging.basicConfig(
@@ -35,7 +43,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-DEFAULT_MODEL_PATH = "data/models/phi-3-mini.gguf"
+DEFAULT_MODEL_PATH = os.path.join(PROJECT_ROOT, "data", "models", "phi-3-mini.gguf")
 DEFAULT_LORA_R = 8
 DEFAULT_LORA_ALPHA = 16
 DEFAULT_LORA_DROPOUT = 0.05
@@ -61,7 +69,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir", 
         type=str, 
-        default="adapters/models",
+        default=MODELS_DIR,
         help="Directory to save the trained adapter"
     )
     parser.add_argument(
@@ -116,7 +124,7 @@ def parse_args():
 
 def find_latest_data_file() -> Optional[str]:
     """Find the most recent email data JSON file if none is specified."""
-    data_files = glob.glob("adapters/data/*.json")
+    data_files = glob.glob(os.path.join(DATA_DIR, "*.json"))
     if not data_files:
         return None
     
@@ -138,9 +146,25 @@ def prepare_training_data(email_data: Dict[str, Any]) -> Dataset:
     """Prepare the email data for training."""
     # Extract training examples from the email data
     training_examples = []
+    has_structured_examples = False
+
+    if "training_examples" in email_data:
+        for example in email_data["training_examples"]:
+            instruction = example.get("instruction", "").strip()
+            input_text = example.get("input", "").strip()
+            output_text = example.get("output", "").strip()
+            if not output_text:
+                continue
+
+            prompt = f"### Instruction: {instruction}"
+            if input_text:
+                prompt += f"\n\n### Input: {input_text}"
+            prompt += f"\n\n### Response: {output_text}"
+            training_examples.append({"text": prompt})
+            has_structured_examples = True
     
     # Check if the data has the expected structure
-    if "trainingData" in email_data and "contextPairs" in email_data["trainingData"]:
+    if not has_structured_examples and "trainingData" in email_data and "contextPairs" in email_data["trainingData"]:
         # Add context pairs
         for pair in email_data["trainingData"]["contextPairs"]:
             training_examples.append({
@@ -148,10 +172,19 @@ def prepare_training_data(email_data: Dict[str, Any]) -> Dataset:
             })
     
     # Add the main email content as a training example
+    subject = ""
+    sender = ""
+    body = ""
     if "emailData" in email_data:
         subject = email_data["emailData"].get("subject", "")
         sender = email_data["emailData"].get("sender", "")
         body = email_data["emailData"].get("body", "")
+    elif "metadata" in email_data:
+        subject = email_data["metadata"].get("subject", "")
+        sender = email_data["metadata"].get("sender", "")
+        body = email_data.get("content", "")
+
+    if subject or sender or body:
         
         # Example 1: Summarize the email
         training_examples.append({
@@ -167,7 +200,9 @@ def prepare_training_data(email_data: Dict[str, Any]) -> Dataset:
         training_examples.append({
             "text": f"### Instruction: Write a response to this email:\nFrom: {sender}\nSubject: {subject}\n\n{body[:200]}\n\n### Response: Thank you for your email regarding {subject}. I have received your message and will respond shortly."
         })
-    
+    if not training_examples:
+        raise ValueError("Email data did not contain any usable training examples")
+
     # Create a Hugging Face dataset
     return Dataset.from_list(training_examples)
 
@@ -264,8 +299,7 @@ def register_adapter_in_db(
     """Register the trained adapter in the database."""
     try:
         # Connect to the database
-        db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend", "db", "mail.db")
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
         # Insert the adapter into the database
@@ -305,8 +339,13 @@ def main():
     
     # Generate adapter name if not provided
     if not args.adapter_name:
+        subject = ""
         if "emailData" in email_data and "subject" in email_data["emailData"]:
             subject = email_data["emailData"]["subject"]
+        elif "metadata" in email_data and "subject" in email_data["metadata"]:
+            subject = email_data["metadata"]["subject"]
+
+        if subject:
             # Clean up the subject to use as part of the adapter name
             clean_subject = "".join(c if c.isalnum() or c.isspace() else "_" for c in subject)
             clean_subject = clean_subject[:30]  # Limit length
@@ -315,7 +354,8 @@ def main():
             args.adapter_name = f"email_lora_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     # Create output directory
-    adapter_dir = os.path.join(args.output_dir, args.adapter_name)
+    output_dir = args.output_dir if os.path.isabs(args.output_dir) else os.path.join(PROJECT_ROOT, args.output_dir)
+    adapter_dir = os.path.join(output_dir, args.adapter_name)
     os.makedirs(adapter_dir, exist_ok=True)
     
     # Prepare the training data
@@ -348,9 +388,6 @@ def main():
     logger.info(f"Training tokens: {train_tokens}")
 
 if __name__ == "__main__":
-    # Import these here to avoid circular imports
-    from transformers import Trainer, DataCollatorForLanguageModeling
-    
     try:
         main()
     except Exception as e:

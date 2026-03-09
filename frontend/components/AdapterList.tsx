@@ -1,45 +1,75 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Adapter } from '../lib/types';
 import { apiClient } from '../lib/api';
+import { formatShortDateTime } from '../lib/format';
 
 interface AdapterListProps {
-  onAdapterSelect?: (adapter: Adapter) => void;
+  onAdapterSelect?: (adapter: Adapter | null) => void;
   selectedAdapterId?: number;
+  onSelectionInvalid?: () => void;
 }
 
-export default function AdapterList({ onAdapterSelect, selectedAdapterId }: AdapterListProps) {
+export default function AdapterList({
+  onAdapterSelect,
+  selectedAdapterId,
+  onSelectionInvalid,
+}: AdapterListProps) {
   const [adapters, setAdapters] = useState<Adapter[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const requestIdRef = useRef(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    fetchAdapters();
-  }, []);
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    abortControllerRef.current?.abort();
 
-  const fetchAdapters = async () => {
-    try {
-      setLoading(true);
-      const adapterData = await apiClient.getAdapters();
-      setAdapters(adapterData);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch adapters');
-      console.error('Error fetching adapters:', err);
-    } finally {
-      setLoading(false);
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
+    async function loadAdapters() {
+      try {
+        setLoading(true);
+        const adapterData = await apiClient.getAdapters(abortController.signal);
+        if (abortController.signal.aborted || requestId !== requestIdRef.current) {
+          return;
+        }
+
+        setAdapters(adapterData);
+        setError(null);
+      } catch (err) {
+        if (abortController.signal.aborted || requestId !== requestIdRef.current) {
+          return;
+        }
+
+        setError(err instanceof Error ? err.message : 'Failed to fetch adapters');
+        console.error('Error fetching adapters:', err);
+      } finally {
+        if (!abortController.signal.aborted && requestId === requestIdRef.current) {
+          setLoading(false);
+        }
+      }
     }
-  };
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    void loadAdapters();
+
+    return () => {
+      abortController.abort();
+    };
+  }, [refreshKey]);
+
+  useEffect(() => {
+    if (selectedAdapterId && !adapters.some((adapter) => adapter.id === selectedAdapterId)) {
+      onSelectionInvalid?.();
+    }
+  }, [adapters, onSelectionInvalid, selectedAdapterId]);
+
+  const refreshAdapters = () => {
+    setRefreshKey((value) => value + 1);
   };
 
   const formatTokenCount = (tokens: number) => {
@@ -70,7 +100,8 @@ export default function AdapterList({ onAdapterSelect, selectedAdapterId }: Adap
             </div>
             <div className="mt-4">
               <button
-                onClick={fetchAdapters}
+                type="button"
+                onClick={refreshAdapters}
                 className="bg-red-100 hover:bg-red-200 text-red-800 px-3 py-2 rounded text-sm"
               >
                 Try again
@@ -90,7 +121,8 @@ export default function AdapterList({ onAdapterSelect, selectedAdapterId }: Adap
           LoRA adapters you create will appear here.
         </p>
         <button
-          onClick={fetchAdapters}
+          type="button"
+          onClick={refreshAdapters}
           className="mt-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
         >
           Refresh
@@ -106,22 +138,41 @@ export default function AdapterList({ onAdapterSelect, selectedAdapterId }: Adap
           <h3 className="text-lg leading-6 font-medium text-gray-900">
             LoRA Adapters ({adapters.length})
           </h3>
-          <button
-            onClick={fetchAdapters}
-            className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded text-sm"
-          >
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            {selectedAdapterId && (
+              <button
+                type="button"
+                onClick={() => onAdapterSelect?.(null)}
+                className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded text-sm"
+              >
+                Clear selection
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={refreshAdapters}
+              className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded text-sm"
+            >
+              Refresh
+            </button>
+          </div>
         </div>
+        <p className="mt-2 text-sm text-gray-500">
+          Selecting an adapter routes chat through the adapter-capable LM Studio path.
+        </p>
       </div>
       <ul className="divide-y divide-gray-200">
         {adapters.map((adapter) => (
           <li key={adapter.id}>
-            <div
-              className={`px-4 py-4 hover:bg-gray-50 cursor-pointer ${
+            <button
+              type="button"
+              className={`w-full px-4 py-4 text-left hover:bg-gray-50 focus:bg-gray-50 ${
                 selectedAdapterId === adapter.id ? 'bg-blue-50 border-r-4 border-blue-500' : ''
               }`}
-              onClick={() => onAdapterSelect?.(adapter)}
+              onClick={() =>
+                onAdapterSelect?.(selectedAdapterId === adapter.id ? null : adapter)
+              }
+              aria-pressed={selectedAdapterId === adapter.id}
             >
               <div className="flex items-center justify-between">
                 <div className="flex-1 min-w-0">
@@ -149,12 +200,12 @@ export default function AdapterList({ onAdapterSelect, selectedAdapterId }: Adap
                       <svg className="flex-shrink-0 mr-1.5 h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
                         <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
                       </svg>
-                      {formatDate(adapter.created_at)}
+                      {formatShortDateTime(adapter.created_at)}
                     </span>
                   </div>
                 </div>
               </div>
-            </div>
+            </button>
           </li>
         ))}
       </ul>

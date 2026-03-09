@@ -1,6 +1,6 @@
 # LoRA Adapters for Email Processing
 
-This directory contains tools for creating and using LoRA (Low-Rank Adaptation) adapters based on email data. These adapters allow the AI model to be fine-tuned on specific email content, improving its ability to understand and respond to similar emails in the future.
+This directory contains the remaining Python-only tooling for creating and using LoRA (Low-Rank Adaptation) adapters based on email data. The main application runtime is Swift + Rust; these scripts are kept only for training and adapter verification.
 
 ## Directory Structure
 
@@ -12,7 +12,7 @@ This directory contains tools for creating and using LoRA (Low-Rank Adaptation) 
 
 ## Workflow
 
-1. **Extract Email Data**: Use the "Extract for LoRA" button in the Mail.app Integration app to extract data from an email. This creates a JSON file in the `data/` directory.
+1. **Extract Email Data**: Use the "Extract for LoRA" button in the Mail.app Integration app to extract data from the currently selected email. This creates a JSON file in the `data/` directory with both the canonical `metadata` / `content` / `training_examples` shape and compatibility keys for the legacy trainer.
 
 2. **Train LoRA Adapter**: Run the `create_lora.sh` script to train a LoRA adapter based on the most recent email data:
 
@@ -26,7 +26,7 @@ This directory contains tools for creating and using LoRA (Low-Rank Adaptation) 
    - Save the adapter to the `models/` directory
    - Register the adapter in the database
 
-3. **Use the Adapter**: The adapter will be automatically available in the Mail.app Integration app for use with the AI model.
+3. **Use the Adapter**: The adapter will be registered in the EmailBrain database and exposed in the web UI.
 
 4. **Test the Adapter**: You can test if the AI can successfully use the adapter with the `test_lora.py` script:
 
@@ -37,7 +37,7 @@ This directory contains tools for creating and using LoRA (Low-Rank Adaptation) 
    This will:
    - List all available adapters
    - Prompt you to select an adapter to test
-   - Send a test prompt to the AI using the selected adapter
+   - Send a test prompt to the local EmailBrain backend using the selected adapter
    - Display the AI's response
 
    You can also specify an adapter ID and custom prompt:
@@ -67,6 +67,8 @@ python3 train_lora.py --data_file adapters/data/your_data_file.json --adapter_na
 - `--learning_rate`: Learning rate (default: 3e-4)
 - `--batch_size`: Training batch size (default: 4)
 - `--max_length`: Maximum sequence length (default: 512)
+
+The test harness reads `EMAILBRAIN_API_URL` from `.env` and targets `http://localhost:3901` by default.
 
 ## Requirements
 
