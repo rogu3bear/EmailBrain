@@ -96,7 +96,7 @@ struct ContentView: View {
                 }) {
                     HStack {
                         Image(systemName: "envelope.badge")
-                        Text("Fetch First Email")
+                        Text("Fetch Selected Email")
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -149,7 +149,7 @@ struct ContentView: View {
                 if let fetchedEmail = result {
                     email = fetchedEmail
                 } else {
-                    errorMessage = "Failed to fetch email from Mail.app. Make sure Mail is running and permissions are granted."
+                    errorMessage = "No selected email was available from Mail.app. Make sure Mail is running, a message is selected, and permissions are granted."
                 }
             }
         }

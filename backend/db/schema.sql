@@ -1,5 +1,5 @@
 -- v1  (SQLite & DuckDB identical)
-CREATE TABLE emails(
+CREATE TABLE IF NOT EXISTS emails(
   id INTEGER PRIMARY KEY,
   thread_id TEXT,
   sender TEXT,
@@ -8,20 +8,20 @@ CREATE TABLE emails(
   date TIMESTAMP,
   body TEXT
 );
-CREATE TABLE adapters(
+CREATE TABLE IF NOT EXISTS adapters(
   id INTEGER PRIMARY KEY,
   name TEXT,
   path TEXT,
   train_tokens INT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE insights(
+CREATE TABLE IF NOT EXISTS insights(
   id INTEGER PRIMARY KEY,
   email_id INT,
   type TEXT,
   payload JSON
 );
-CREATE TABLE logs(
+CREATE TABLE IF NOT EXISTS logs(
   id INTEGER PRIMARY KEY,
   ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   prompt TEXT,

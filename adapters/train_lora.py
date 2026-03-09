@@ -28,9 +28,11 @@ from transformers import (
 from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_training
 from datasets import Dataset
 
-# Add the project root to the Python path to import from backend
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from backend.config import settings
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+MODELS_DIR = os.path.join(SCRIPT_DIR, "models")
+DB_PATH = os.path.join(PROJECT_ROOT, "backend", "db", "mail.db")
 
 # Configure logging
 logging.basicConfig(
@@ -41,7 +43,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-DEFAULT_MODEL_PATH = "data/models/phi-3-mini.gguf"
+DEFAULT_MODEL_PATH = os.path.join(PROJECT_ROOT, "data", "models", "phi-3-mini.gguf")
 DEFAULT_LORA_R = 8
 DEFAULT_LORA_ALPHA = 16
 DEFAULT_LORA_DROPOUT = 0.05
@@ -67,7 +69,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir", 
         type=str, 
-        default="adapters/models",
+        default=MODELS_DIR,
         help="Directory to save the trained adapter"
     )
     parser.add_argument(
@@ -122,7 +124,7 @@ def parse_args():
 
 def find_latest_data_file() -> Optional[str]:
     """Find the most recent email data JSON file if none is specified."""
-    data_files = glob.glob("adapters/data/*.json")
+    data_files = glob.glob(os.path.join(DATA_DIR, "*.json"))
     if not data_files:
         return None
     
@@ -297,8 +299,7 @@ def register_adapter_in_db(
     """Register the trained adapter in the database."""
     try:
         # Connect to the database
-        db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend", "db", "mail.db")
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
         # Insert the adapter into the database
@@ -353,7 +354,8 @@ def main():
             args.adapter_name = f"email_lora_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     # Create output directory
-    adapter_dir = os.path.join(args.output_dir, args.adapter_name)
+    output_dir = args.output_dir if os.path.isabs(args.output_dir) else os.path.join(PROJECT_ROOT, args.output_dir)
+    adapter_dir = os.path.join(output_dir, args.adapter_name)
     os.makedirs(adapter_dir, exist_ok=True)
     
     # Prepare the training data

@@ -18,9 +18,15 @@ import httpx
 import asyncio
 from typing import List, Dict, Any, Optional
 
-# Add the project root to the Python path to import from backend
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from backend.config import settings
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DB_PATH = os.path.join(PROJECT_ROOT, "backend", "db", "mail.db")
+
+sys.path.append(PROJECT_ROOT)
+try:
+    from backend.config import settings
+except Exception:  # pragma: no cover - optional dependency path
+    settings = None
 
 # Configure logging
 logging.basicConfig(
@@ -30,7 +36,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-API_BASE_URL = str(settings.EMAILBRAIN_API_URL).rstrip("/")
+API_BASE_URL = (
+    str(settings.EMAILBRAIN_API_URL).rstrip("/")
+    if settings is not None
+    else os.environ.get("EMAILBRAIN_API_URL", "http://127.0.0.1:3901").rstrip("/")
+)
 
 def parse_args():
     """Parse command line arguments."""
@@ -51,8 +61,7 @@ def parse_args():
 
 def get_db_connection():
     """Create a connection to the SQLite database."""
-    db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend", "db", "mail.db")
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -140,11 +149,13 @@ def display_response(response: Dict[str, Any]):
     print("-" * 80)
     
     if "choices" in response and len(response["choices"]) > 0:
-        if "message" in response["choices"][0] and "content" in response["choices"][0]["message"]:
-            content = response["choices"][0]["message"]["content"]
-            print(content)
-        else:
-            print("No content in response")
+        for index, choice in enumerate(response["choices"], start=1):
+            if "message" in choice and "content" in choice["message"]:
+                if len(response["choices"]) > 1:
+                    print(f"[choice {index}]")
+                print(choice["message"]["content"])
+            else:
+                print("No content in response")
     else:
         print("No choices in response")
     

@@ -1,12 +1,13 @@
 use std::{
     env, fs,
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 use axum::{
     Json, Router,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{
         HeaderValue, Method, StatusCode,
         header::{ACCEPT, CONTENT_TYPE},
@@ -19,14 +20,19 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 const DEFAULT_FRONTEND_ORIGIN: &str = "http://localhost:3900";
 const DEFAULT_LM_STUDIO_URL: &str = "http://127.0.0.1:1234";
 const DEFAULT_JKCA_APP_BASE_URL: &str = "http://127.0.0.1:8100";
 const DEFAULT_INFERENCE_PROVIDER: &str = "lmstudio";
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:3901";
-const SEED_EMAIL_DATE: &str = "2026-03-09T00:00:00Z";
+const DEFAULT_CHAT_MAX_TOKENS: i64 = 150;
+const DEFAULT_PAGE_SIZE: i64 = 100;
+const MAX_PAGE_SIZE: i64 = 200;
+const MAX_LOG_CHARS: usize = 2_000;
+const SCHEMA_SQL: &str = include_str!("../db/schema.sql");
+const REQUIRED_TABLES: [&str; 4] = ["emails", "adapters", "insights", "logs"];
 
 #[derive(Clone)]
 struct AppState {
@@ -35,6 +41,7 @@ struct AppState {
     lm_studio_url: String,
     jkca_app_base_url: String,
     inference_provider: InferenceProvider,
+    chat_max_tokens: i64,
     http_client: Client,
 }
 
@@ -141,6 +148,12 @@ struct ChatRequest {
     adapter_id: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ListQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 struct EmailListResponse {
     emails: Vec<EmailListItem>,
@@ -184,15 +197,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(Path::to_path_buf)
         .ok_or("backend directory must have a parent project root")?;
     let db_path = manifest_dir.join("db").join("mail.db");
-    let schema_path = manifest_dir.join("db").join("schema.sql");
-    ensure_database(&db_path, &schema_path)?;
+    ensure_database(&db_path)?;
 
     let frontend_origin =
         env::var("FRONTEND_ORIGIN").unwrap_or_else(|_| DEFAULT_FRONTEND_ORIGIN.to_string());
-    let inference_provider = InferenceProvider::parse(
+    let inference_provider = match InferenceProvider::parse(
         &env::var("EMAILBRAIN_INFERENCE_PROVIDER")
             .unwrap_or_else(|_| DEFAULT_INFERENCE_PROVIDER.to_string()),
-    )?;
+    ) {
+        Ok(provider) => provider,
+        Err(message) => {
+            warn!("{message}; falling back to {DEFAULT_INFERENCE_PROVIDER}");
+            InferenceProvider::LmStudio
+        }
+    };
+    let chat_max_tokens = parse_chat_max_tokens(
+        &env::var("EMAILBRAIN_CHAT_MAX_TOKENS")
+            .unwrap_or_else(|_| DEFAULT_CHAT_MAX_TOKENS.to_string()),
+    );
     let state = AppState {
         db_path,
         project_root,
@@ -200,13 +222,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jkca_app_base_url: env::var("JKCA_APP_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_JKCA_APP_BASE_URL.into()),
         inference_provider,
+        chat_max_tokens,
         http_client: Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(Duration::from_secs(30))
             .build()?,
     };
 
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::exact(frontend_origin.parse::<HeaderValue>()?))
+        .allow_origin(AllowOrigin::list(configured_frontend_origins(&frontend_origin)))
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([ACCEPT, CONTENT_TYPE])
         .allow_credentials(true);
@@ -221,9 +244,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(cors)
         .with_state(state);
 
-    let bind_addr = env::var("EMAILBRAIN_BIND").unwrap_or_else(|_| DEFAULT_BIND_ADDR.into());
+    let bind_addr =
+        parse_bind_addr(&env::var("EMAILBRAIN_BIND").unwrap_or_else(|_| DEFAULT_BIND_ADDR.into()));
     let addr: SocketAddr = bind_addr.parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|error| format!("failed to bind EmailBrain backend on http://{bind_addr}: {error}"))?;
     info!(
         "EmailBrain Rust backend listening on http://{bind_addr} using inference provider {}",
         provider_label
@@ -239,13 +265,17 @@ async fn health() -> Json<HealthResponse> {
 
 async fn list_adapters(
     State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<AdapterListResponse>, AppError> {
     let conn = open_db(&state.db_path)?;
+    let (limit, offset) = pagination(query);
     let mut stmt = conn
-        .prepare("SELECT id, name, path, train_tokens, created_at FROM adapters ORDER BY created_at DESC")
+        .prepare(
+            "SELECT id, name, path, train_tokens, created_at FROM adapters ORDER BY datetime(created_at) DESC, id DESC LIMIT ?1 OFFSET ?2",
+        )
         .map_err(db_error)?;
     let rows = stmt
-        .query_map([], |row| {
+        .query_map(params![limit, offset], |row| {
             Ok(AdapterRecord {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -261,15 +291,19 @@ async fn list_adapters(
     Ok(Json(AdapterListResponse { adapters }))
 }
 
-async fn list_emails(State(state): State<AppState>) -> Result<Json<EmailListResponse>, AppError> {
+async fn list_emails(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<EmailListResponse>, AppError> {
     let conn = open_db(&state.db_path)?;
+    let (limit, offset) = pagination(query);
     let mut stmt = conn
         .prepare(
-            "SELECT id, subject, sender, date, recipients, thread_id FROM emails ORDER BY date DESC",
+            "SELECT id, subject, sender, date, recipients, thread_id FROM emails ORDER BY datetime(date) DESC, id DESC LIMIT ?1 OFFSET ?2",
         )
         .map_err(db_error)?;
     let rows = stmt
-        .query_map([], |row| {
+        .query_map(params![limit, offset], |row| {
             Ok(EmailListItem {
                 id: row.get(0)?,
                 subject: row.get(1)?,
@@ -289,6 +323,13 @@ async fn get_email(
     AxumPath(email_id): AxumPath<i64>,
     State(state): State<AppState>,
 ) -> Result<Json<EmailDetailResponse>, AppError> {
+    if email_id < 1 {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "Email ID must be a positive integer",
+        ));
+    }
+
     let conn = open_db(&state.db_path)?;
     let email = conn
         .query_row(
@@ -308,7 +349,12 @@ async fn get_email(
         )
         .optional()
         .map_err(db_error)?
-        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, format!("Email with ID {email_id} not found")))?;
+        .ok_or_else(|| {
+            AppError::new(
+                StatusCode::NOT_FOUND,
+                format!("Email with ID {email_id} not found"),
+            )
+        })?;
 
     Ok(Json(EmailDetailResponse { email }))
 }
@@ -317,16 +363,45 @@ async fn receive_email(
     State(state): State<AppState>,
     Json(email): Json<EmailInput>,
 ) -> Result<Json<ReceiveEmailResponse>, AppError> {
+    let email = validate_email_input(&state, email)?;
     let conn = open_db(&state.db_path)?;
+    let existing_email_id = conn
+        .query_row(
+            "SELECT id FROM emails WHERE subject = ?1 AND sender = ?2 AND body = ?3 AND date = ?4 AND COALESCE(recipients, '') = COALESCE(?5, '') AND COALESCE(thread_id, '') = COALESCE(?6, '')",
+            params![
+                &email.subject,
+                &email.sender,
+                &email.body,
+                &email.date,
+                &email.recipients,
+                &email.thread_id
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+
+    if let Some(email_id) = existing_email_id {
+        info!(
+            "email '{}' from {} already exists as {}",
+            email.subject, email.sender, email_id
+        );
+        return Ok(Json(ReceiveEmailResponse {
+            message: "Email already exists".into(),
+            email_id,
+            email,
+        }));
+    }
+
     conn.execute(
         "INSERT INTO emails (subject, sender, body, date, recipients, thread_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
-            email.subject,
-            email.sender,
-            email.body,
-            email.date,
-            email.recipients,
-            email.thread_id
+            &email.subject,
+            &email.sender,
+            &email.body,
+            &email.date,
+            &email.recipients,
+            &email.thread_id
         ],
     )
     .map_err(db_error)?;
@@ -345,6 +420,13 @@ async fn chat(
     State(state): State<AppState>,
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<Value>, AppError> {
+    if request.prompt.trim().is_empty() {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "Prompt must not be empty",
+        ));
+    }
+
     let adapter = match request.adapter_id {
         Some(adapter_id) => Some(fetch_adapter(&state, adapter_id)?),
         None => None,
@@ -369,14 +451,20 @@ async fn chat(
             extract_jkca_generated_text(&response_json).map(|content| count_words(&content))
         })
         .unwrap_or(0);
-    log_chat_interaction(
+    let response_excerpt = extract_response_text(&response_json)
+        .map(ToOwned::to_owned)
+        .or_else(|| extract_jkca_generated_text(&response_json))
+        .unwrap_or_else(|| "[non-text chat response]".into());
+    if let Err(error) = log_chat_interaction(
         &state,
         &request.prompt,
-        &response_json.to_string(),
+        &response_excerpt,
         count_words(&request.prompt),
-        tokens_out as i64,
+        tokens_out,
         request.adapter_id,
-    )?;
+    ) {
+        warn!("failed to persist chat interaction: {}", error.message);
+    }
 
     Ok(Json(response_json))
 }
@@ -388,17 +476,34 @@ async fn chat_via_lm_studio(
 ) -> Result<Value, AppError> {
     let mut payload = json!({
         "model": "local-model",
-        "messages": [{ "role": "user", "content": request.prompt }],
+        "messages": [{ "role": "user", "content": request.prompt.trim() }],
         "temperature": 0.7,
-        "max_tokens": 150
+        "max_tokens": state.chat_max_tokens
     });
 
     if let Some(adapter) = adapter {
-        let adapter_path = state.project_root.join(&adapter.path);
+        let adapter_path = resolve_adapter_path(&state.project_root, &adapter.path)?;
         if !adapter_path.exists() {
             return Err(AppError::new(
                 StatusCode::NOT_FOUND,
                 format!("LoRA adapter file not found at {}", adapter_path.display()),
+            ));
+        }
+        if adapter_path.is_dir()
+            && adapter_path
+                .read_dir()
+                .map_err(|error| {
+                    AppError::internal(format!(
+                        "Failed to inspect adapter directory {}: {error}",
+                        adapter_path.display()
+                    ))
+                })?
+                .next()
+                .is_none()
+        {
+            return Err(AppError::new(
+                StatusCode::BAD_REQUEST,
+                format!("LoRA adapter directory is empty at {}", adapter_path.display()),
             ));
         }
 
@@ -425,13 +530,16 @@ async fn chat_via_lm_studio(
     if !status.is_success() {
         error!("LM Studio API error {}: {}", status, response_text);
         return Err(AppError::new(
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            StatusCode::BAD_GATEWAY,
             format!("LM Studio API error: {response_text}"),
         ));
     }
 
     serde_json::from_str(&response_text).map_err(|error| {
-        AppError::internal(format!("Failed to decode LM Studio response: {error}"))
+        AppError::new(
+            StatusCode::BAD_GATEWAY,
+            format!("Failed to decode LM Studio response: {error}"),
+        )
     })
 }
 
@@ -451,8 +559,8 @@ async fn chat_via_jkca(
     }
 
     let payload = json!({
-        "user_content": request.prompt,
-        "max_tokens": 32
+        "user_content": request.prompt.trim(),
+        "max_tokens": state.chat_max_tokens
     });
 
     let response = state
@@ -468,13 +576,17 @@ async fn chat_via_jkca(
     if !status.is_success() {
         error!("JKCA runtime API error {}: {}", status, response_text);
         return Err(AppError::new(
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            StatusCode::BAD_GATEWAY,
             format!("JKCA runtime API error: {response_text}"),
         ));
     }
 
-    let raw_json: Value = serde_json::from_str(&response_text)
-        .map_err(|error| AppError::internal(format!("Failed to decode JKCA response: {error}")))?;
+    let raw_json: Value = serde_json::from_str(&response_text).map_err(|error| {
+        AppError::new(
+            StatusCode::BAD_GATEWAY,
+            format!("Failed to decode JKCA response: {error}"),
+        )
+    })?;
     let generated = extract_jkca_generated_text(&raw_json).ok_or_else(|| {
         AppError::internal("JKCA runtime response did not include generated text")
     })?;
@@ -486,25 +598,22 @@ async fn chat_via_jkca(
     ))
 }
 
-fn ensure_database(db_path: &Path, schema_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn ensure_database(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    if !schema_path.exists() {
-        return Err(format!("Schema file not found at {}", schema_path.display()).into());
-    }
-
     let mut conn = Connection::open(db_path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     let tables_exist: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('emails', 'adapters', 'logs')",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('emails', 'adapters', 'insights', 'logs')",
         [],
         |row| row.get(0),
     )?;
 
-    if tables_exist == 0 {
-        let schema_sql = fs::read_to_string(schema_path)?;
-        conn.execute_batch(&schema_sql)?;
+    if tables_exist < REQUIRED_TABLES.len() as i64 {
+        conn.execute_batch(SCHEMA_SQL)?;
     }
 
     seed_database(&mut conn)?;
@@ -515,12 +624,11 @@ fn seed_database(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     let email_count: i64 = conn.query_row("SELECT COUNT(*) FROM emails", [], |row| row.get(0))?;
     if email_count == 0 {
         conn.execute(
-            "INSERT INTO emails (subject, sender, body, date, recipients, thread_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO emails (subject, sender, body, date, recipients, thread_id) VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?4, ?5)",
             params![
                 "Welcome to EmailBrain",
                 "system@emailbrain.local",
                 "EmailBrain is ready. Connect the Swift Mail app or POST to /api/v1/emails to ingest real messages.",
-                SEED_EMAIL_DATE,
                 "you@emailbrain.local",
                 "seed-welcome"
             ],
@@ -544,10 +652,19 @@ fn seed_database(conn: &mut Connection) -> Result<(), rusqlite::Error> {
 }
 
 fn open_db(db_path: &Path) -> Result<Connection, AppError> {
-    Connection::open(db_path).map_err(db_error)
+    let conn = Connection::open(db_path).map_err(db_error)?;
+    conn.busy_timeout(Duration::from_secs(5)).map_err(db_error)?;
+    Ok(conn)
 }
 
 fn fetch_adapter(state: &AppState, adapter_id: i64) -> Result<AdapterWithMetadata, AppError> {
+    if adapter_id < 1 {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "Adapter ID must be a positive integer",
+        ));
+    }
+
     let conn = open_db(&state.db_path)?;
     conn.query_row(
         "SELECT id, name, path FROM adapters WHERE id = ?1",
@@ -581,7 +698,13 @@ fn log_chat_interaction(
     let conn = open_db(&state.db_path)?;
     conn.execute(
         "INSERT INTO logs (prompt, response, tokens_in, tokens_out, adapter_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![prompt, response, tokens_in, tokens_out, adapter_id],
+        params![
+            truncate_for_log(prompt),
+            truncate_for_log(response),
+            tokens_in,
+            tokens_out,
+            adapter_id
+        ],
     )
     .map_err(db_error)?;
     Ok(())
@@ -686,6 +809,13 @@ fn map_lmstudio_error(error: reqwest::Error) -> AppError {
         );
     }
 
+    if error.is_builder() || error.is_request() {
+        return AppError::new(
+            StatusCode::BAD_GATEWAY,
+            format!("Invalid LM Studio request: {error}"),
+        );
+    }
+
     AppError::internal(format!("Unexpected HTTP error: {error}"))
 }
 
@@ -704,16 +834,194 @@ fn map_jkca_error(error: reqwest::Error) -> AppError {
         );
     }
 
+    if error.is_builder() || error.is_request() {
+        return AppError::new(
+            StatusCode::BAD_GATEWAY,
+            format!("Invalid JKCA request: {error}"),
+        );
+    }
+
     AppError::internal(format!("Unexpected JKCA HTTP error: {error}"))
+}
+
+fn validate_email_input(state: &AppState, email: EmailInput) -> Result<EmailInput, AppError> {
+    let subject = email.subject.trim();
+    if subject.is_empty() {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "Email subject must not be empty",
+        ));
+    }
+
+    let sender = email.sender.trim();
+    if sender.is_empty() {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "Email sender must not be empty",
+        ));
+    }
+
+    let body = email.body.trim();
+    if body.is_empty() {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "Email body must not be empty",
+        ));
+    }
+
+    let normalized_date = normalize_timestamp(&state.db_path, &email.date)?;
+
+    Ok(EmailInput {
+        subject: subject.to_string(),
+        sender: sender.to_string(),
+        body: body.to_string(),
+        date: normalized_date,
+        recipients: email.recipients.and_then(trim_optional),
+        thread_id: email.thread_id.and_then(trim_optional),
+    })
+}
+
+fn normalize_timestamp(db_path: &Path, raw: &str) -> Result<String, AppError> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "Email date must not be empty",
+        ));
+    }
+
+    let conn = open_db(db_path)?;
+    conn.query_row(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', ?1)",
+        [value],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .map_err(db_error)?
+    .filter(|normalized| !normalized.is_empty())
+    .ok_or_else(|| {
+        AppError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Email date '{value}' is not a supported timestamp"),
+        )
+    })
+}
+
+fn trim_optional(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn pagination(query: ListQuery) -> (i64, i64) {
+    let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
+    let offset = query.offset.unwrap_or(0).max(0);
+    (limit, offset)
+}
+
+fn configured_frontend_origins(raw: &str) -> Vec<HeaderValue> {
+    let mut values = Vec::new();
+    for origin in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+        push_origin_aliases(&mut values, origin);
+    }
+
+    if values.is_empty() {
+        push_origin_aliases(&mut values, DEFAULT_FRONTEND_ORIGIN);
+    }
+
+    values
+}
+
+fn push_origin_aliases(values: &mut Vec<HeaderValue>, origin: &str) {
+    for candidate in local_origin_aliases(origin) {
+        if let Ok(header) = candidate.parse::<HeaderValue>() {
+            if !values.iter().any(|existing| existing == &header) {
+                values.push(header);
+            }
+        } else {
+            warn!("ignoring invalid FRONTEND_ORIGIN entry '{candidate}'");
+        }
+    }
+}
+
+fn local_origin_aliases(origin: &str) -> Vec<String> {
+    let mut aliases = vec![origin.to_string()];
+    if let Some(rest) = origin.strip_prefix("http://localhost:") {
+        aliases.push(format!("http://127.0.0.1:{rest}"));
+    } else if let Some(rest) = origin.strip_prefix("http://127.0.0.1:") {
+        aliases.push(format!("http://localhost:{rest}"));
+    } else if let Some(rest) = origin.strip_prefix("https://localhost:") {
+        aliases.push(format!("https://127.0.0.1:{rest}"));
+    } else if let Some(rest) = origin.strip_prefix("https://127.0.0.1:") {
+        aliases.push(format!("https://localhost:{rest}"));
+    }
+    aliases
+}
+
+fn parse_bind_addr(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.parse::<SocketAddr>().is_ok() {
+        return trimmed.to_string();
+    }
+
+    warn!(
+        "invalid EMAILBRAIN_BIND '{}'; falling back to {}",
+        trimmed, DEFAULT_BIND_ADDR
+    );
+    DEFAULT_BIND_ADDR.to_string()
+}
+
+fn parse_chat_max_tokens(raw: &str) -> i64 {
+    match raw.trim().parse::<i64>() {
+        Ok(value) if value > 0 => value,
+        _ => {
+            warn!(
+                "invalid EMAILBRAIN_CHAT_MAX_TOKENS '{}'; falling back to {}",
+                raw, DEFAULT_CHAT_MAX_TOKENS
+            );
+            DEFAULT_CHAT_MAX_TOKENS
+        }
+    }
+}
+
+fn resolve_adapter_path(project_root: &Path, adapter_path: &str) -> Result<PathBuf, AppError> {
+    let relative_path = Path::new(adapter_path);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Adapter path '{}' must stay inside the project root", adapter_path),
+        ));
+    }
+
+    Ok(project_root.join(relative_path))
+}
+
+fn truncate_for_log(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= MAX_LOG_CHARS {
+        return trimmed.to_string();
+    }
+
+    let mut truncated = trimmed.chars().take(MAX_LOG_CHARS).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        InferenceProvider, count_words, extract_jkca_generated_text, jkca_runtime_generate_url,
-        lm_chat_url, preferred_inference_provider,
+        DEFAULT_BIND_ADDR, DEFAULT_CHAT_MAX_TOKENS, InferenceProvider, configured_frontend_origins,
+        count_words, extract_jkca_generated_text, jkca_runtime_generate_url, lm_chat_url,
+        parse_bind_addr, parse_chat_max_tokens, preferred_inference_provider, resolve_adapter_path,
+        truncate_for_log,
     };
     use serde_json::json;
+    use std::path::Path;
 
     #[test]
     fn trims_trailing_slash_when_building_lm_studio_url() {
@@ -764,5 +1072,35 @@ mod tests {
             preferred_inference_provider(InferenceProvider::Jkca, false),
             InferenceProvider::Jkca
         ));
+    }
+
+    #[test]
+    fn adds_localhost_alias_for_default_frontend_origin() {
+        let origins = configured_frontend_origins("http://localhost:3900");
+        assert_eq!(origins.len(), 2);
+    }
+
+    #[test]
+    fn falls_back_to_default_bind_addr_when_invalid() {
+        assert_eq!(parse_bind_addr("not-an-addr"), DEFAULT_BIND_ADDR);
+    }
+
+    #[test]
+    fn falls_back_to_default_chat_max_tokens_when_invalid() {
+        assert_eq!(parse_chat_max_tokens("oops"), DEFAULT_CHAT_MAX_TOKENS);
+    }
+
+    #[test]
+    fn rejects_adapter_paths_that_escape_project_root() {
+        let result = resolve_adapter_path(Path::new("/tmp/project"), "../escape");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn truncates_large_log_entries() {
+        let value = "x".repeat(2_100);
+        let truncated = truncate_for_log(&value);
+        assert!(truncated.len() < value.len());
+        assert!(truncated.ends_with("..."));
     }
 }
