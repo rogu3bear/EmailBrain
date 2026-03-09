@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var showSuccess = false
+    @State private var successMessage = "Operation completed successfully."
     
     var body: some View {
         VStack(spacing: 20) {
@@ -120,7 +121,7 @@ struct ContentView: View {
         .alert("Success", isPresented: $showSuccess) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("Email data sent to backend successfully!")
+            Text(successMessage)
         }
     }
     
@@ -157,12 +158,23 @@ struct ContentView: View {
     // Send email data to backend
     private func sendEmailToBackend() {
         guard let email = email else { return }
-        
-        // Use the MailService to send the email data
-        MailService.shared.sendEmailToBackend(email: email)
-        
-        // Show success message
-        showSuccess = true
+
+        isLoading = true
+        errorMessage = nil
+
+        MailService.shared.sendEmailToBackend(email: email) { result in
+            DispatchQueue.main.async {
+                isLoading = false
+
+                switch result {
+                case .success:
+                    successMessage = "Email data sent to backend successfully."
+                    showSuccess = true
+                case .failure(let error):
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
     }
     
     /// Extracts the current email data for LoRA adapter training
@@ -174,13 +186,14 @@ struct ContentView: View {
         
         // Use background thread for potentially slow operation
         DispatchQueue.global(qos: .userInitiated).async {
-            let filePath = EmailExtractor.shared.extractAndSaveEmailData()
+            let filePath = EmailExtractor.shared.extractAndSaveEmailData(from: email)
             
             // Update UI on main thread
             DispatchQueue.main.async {
                 isLoading = false
                 
                 if filePath != nil {
+                    successMessage = "Email data extracted for LoRA training."
                     showSuccess = true
                 } else {
                     errorMessage = "Failed to extract email data for LoRA training."

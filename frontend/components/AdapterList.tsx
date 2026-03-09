@@ -113,6 +113,9 @@ export default function AdapterList({ onAdapterSelect, selectedAdapterId }: Adap
             Refresh
           </button>
         </div>
+        <p className="mt-2 text-sm text-gray-500">
+          Selecting an adapter routes chat through the adapter-capable LM Studio path.
+        </p>
       </div>
       <ul className="divide-y divide-gray-200">
         {adapters.map((adapter) => (

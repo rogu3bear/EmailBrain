@@ -136,8 +136,8 @@ export default function HomePage() {
           <div className="flex justify-between items-center text-sm text-gray-500">
             <p>EmailBrain - AI-powered email analysis</p>
             <div className="flex items-center space-x-4">
-              <span>Backend: localhost:8000</span>
-              <span>Frontend: localhost:3000</span>
+              <span>Backend: localhost:3901</span>
+              <span>Frontend: localhost:3900</span>
             </div>
           </div>
         </div>

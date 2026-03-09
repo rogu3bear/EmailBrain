@@ -16,18 +16,13 @@ class EmailExtractor {
     private init() {}
     
     /// Extracts information from the most recent email and saves it to a JSON file
+    /// - Parameter email: The email selected in the Swift UI
     /// - Returns: The path to the saved JSON file, or nil if extraction failed
-    func extractAndSaveEmailData() -> String? {
-        // Step 1: Retrieve the most recent email using the existing MailService
-        guard let email = MailService.shared.getFirstEmail() else {
-            print("Failed to retrieve email")
-            return nil
-        }
-        
-        // Step 2: Format the email content for LoRA adapter training
+    func extractAndSaveEmailData(from email: Email) -> String? {
+        // Step 1: Format the email content for LoRA adapter training
         let formattedData = formatEmailForLoRA(email)
         
-        // Step 3: Save the formatted data to a JSON file
+        // Step 2: Save the formatted data to a JSON file
         return saveToJSON(formattedData)
     }
     
@@ -77,18 +72,36 @@ class EmailExtractor {
             ]
         ]
         
-        // Create the final formatted data
+        let metadata: [String: Any] = [
+            "source": "Mail.app",
+            "sender": email.sender,
+            "subject": email.subject,
+            "date": dateFormatter.string(from: email.receivedDate),
+            "isRead": email.isRead,
+            "hasAttachments": email.hasAttachments
+        ]
+        let emailData: [String: Any] = [
+            "subject": email.subject,
+            "sender": email.sender,
+            "body": formattedBody
+        ]
+        let contextPairs = trainingExamples.map { example in
+            [
+                "input": example["input"] ?? "",
+                "output": example["output"] ?? ""
+            ]
+        }
+        
+        // Keep one canonical top-level shape while preserving the legacy keys
+        // expected by the existing Python tooling.
         return [
-            "metadata": [
-                "source": "Mail.app",
-                "sender": email.sender,
-                "subject": email.subject,
-                "date": dateFormatter.string(from: email.receivedDate),
-                "isRead": email.isRead,
-                "hasAttachments": email.hasAttachments
-            ],
+            "metadata": metadata,
             "content": formattedBody,
-            "training_examples": trainingExamples
+            "training_examples": trainingExamples,
+            "emailData": emailData,
+            "trainingData": [
+                "contextPairs": contextPairs
+            ]
         ]
     }
     
@@ -125,33 +138,6 @@ class EmailExtractor {
         } catch {
             print("Error saving email data: \(error)")
             return nil
-        }
-    }
-}
-
-// Extension to ContentView to add functionality for extracting email data
-extension ContentView {
-    /// Extracts data from the most recent email and saves it for LoRA training
-    func extractEmailForLoRA() {
-        isLoading = true
-        errorMessage = nil
-        
-        // Use background thread for potentially slow operation
-        DispatchQueue.global(qos: .userInitiated).async {
-            let filePath = EmailExtractor.shared.extractAndSaveEmailData()
-            
-            // Update UI on main thread
-            DispatchQueue.main.async {
-                isLoading = false
-                
-                if let path = filePath {
-                    showSuccess = true
-                    // In a real app, you might want to display the path or take further action
-                    print("Email data extracted and saved to: \(path)")
-                } else {
-                    errorMessage = "Failed to extract email data. Make sure Mail is running and permissions are granted."
-                }
-            }
         }
     }
 }

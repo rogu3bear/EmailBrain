@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Email } from '../lib/types';
 import { apiClient } from '../lib/api';
 
@@ -14,11 +14,7 @@ export default function EmailDetail({ emailId, onBack }: EmailDetailProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchEmail();
-  }, [emailId]);
-
-  const fetchEmail = async () => {
+  const fetchEmail = useCallback(async () => {
     try {
       setLoading(true);
       const emailData = await apiClient.getEmail(emailId);
@@ -30,7 +26,11 @@ export default function EmailDetail({ emailId, onBack }: EmailDetailProps) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [emailId]);
+
+  useEffect(() => {
+    void fetchEmail();
+  }, [emailId, fetchEmail]);
 
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString('en-US', {

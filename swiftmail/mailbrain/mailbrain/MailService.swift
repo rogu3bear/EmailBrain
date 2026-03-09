@@ -8,8 +8,8 @@
 import Foundation
 import AppKit
 
-// Structure to represent an email
-struct Email: Identifiable, Codable {
+// Structure to represent an email fetched from Mail.app.
+struct Email: Identifiable {
     var id = UUID()
     var subject: String
     var sender: String
@@ -19,12 +19,6 @@ struct Email: Identifiable, Codable {
     // Additional properties that might be useful
     var isRead: Bool
     var hasAttachments: Bool
-    
-    // For JSON encoding/decoding to match backend API
-    enum CodingKeys: String, CodingKey {
-        case subject, sender, body
-        case receivedDate = "date"
-    }
 }
 
 // Structure for API payload to backend
@@ -97,10 +91,12 @@ class MailService {
     }
     
     // Method to send email data to the backend
-    func sendEmailToBackend(email: Email) {
+    func sendEmailToBackend(email: Email, completion: @escaping (Result<Void, Error>) -> Void) {
         // Backend URL
-        guard let url = URL(string: "http://localhost:8000/api/v1/emails") else {
-            print("Error: Invalid backend URL")
+        guard let url = URL(string: "http://localhost:3901/api/v1/emails") else {
+            completion(.failure(NSError(domain: "MailService", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid backend URL"
+            ])))
             return
         }
         
@@ -120,7 +116,9 @@ class MailService {
         
         // Encode to JSON
         guard let jsonData = try? JSONEncoder().encode(payload) else {
-            print("Error: Failed to encode email data to JSON")
+            completion(.failure(NSError(domain: "MailService", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Failed to encode email data to JSON"
+            ])))
             return
         }
         
@@ -134,6 +132,7 @@ class MailService {
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 print("Error sending email to backend: \(error.localizedDescription)")
+                completion(.failure(error))
                 return
             }
             
@@ -145,13 +144,26 @@ class MailService {
                     if let data = data, let responseString = String(data: data, encoding: .utf8) {
                         print("Response: \(responseString)")
                     }
+                    completion(.success(()))
                 } else {
                     print("❌ Failed to send email to backend. Status: \(httpResponse.statusCode)")
+                    let message: String
                     if let data = data, let responseString = String(data: data, encoding: .utf8) {
                         print("Error response: \(responseString)")
+                        message = responseString
+                    } else {
+                        message = "Backend returned status \(httpResponse.statusCode)"
                     }
+                    completion(.failure(NSError(domain: "MailService", code: httpResponse.statusCode, userInfo: [
+                        NSLocalizedDescriptionKey: message
+                    ])))
                 }
+                return
             }
+
+            completion(.failure(NSError(domain: "MailService", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Backend response was not an HTTP response"
+            ])))
         }
         
         task.resume()

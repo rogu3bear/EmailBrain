@@ -11,7 +11,6 @@ This script tests if the AI can successfully use a LoRA adapter by:
 
 import os
 import sys
-import json
 import sqlite3
 import argparse
 import logging
@@ -30,6 +29,8 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
+
+API_BASE_URL = str(settings.EMAILBRAIN_API_URL).rstrip("/")
 
 def parse_args():
     """Parse command line arguments."""
@@ -100,7 +101,7 @@ async def test_adapter_with_ai(adapter_id: int, prompt: str) -> Dict[str, Any]:
         # Send the request to the backend API
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{settings.LM_STUDIO_URL.rstrip('/')}/api/v1/chat",
+                f"{API_BASE_URL}/api/v1/chat",
                 json=payload,
             )
             
@@ -111,8 +112,8 @@ async def test_adapter_with_ai(adapter_id: int, prompt: str) -> Dict[str, Any]:
             return response.json()
     
     except httpx.ConnectError:
-        logger.error(f"Failed to connect to API at {settings.LM_STUDIO_URL}")
-        raise ConnectionError(f"Failed to connect to API at {settings.LM_STUDIO_URL}")
+        logger.error(f"Failed to connect to API at {API_BASE_URL}")
+        raise ConnectionError(f"Failed to connect to API at {API_BASE_URL}")
     except Exception as e:
         logger.error(f"Error testing adapter: {e}")
         raise

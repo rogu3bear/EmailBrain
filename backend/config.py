@@ -1,5 +1,6 @@
 from functools import lru_cache
-from pydantic import BaseSettings, Field, AnyUrl
+from pydantic import AnyUrl, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -14,7 +15,7 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
 
     # CORS
-    FRONTEND_ORIGIN: str = Field("http://localhost:3000", env="FRONTEND_ORIGIN")
+    FRONTEND_ORIGIN: str = Field("http://localhost:3900", env="FRONTEND_ORIGIN")
 
     # Database
     DATABASE_URL: str = Field("sqlite+aiosqlite:///./backend/db/mail.db", env="DATABASE_URL")
@@ -23,10 +24,17 @@ class Settings(BaseSettings):
     LM_STUDIO_URL: AnyUrl = Field("http://127.0.0.1:1234", env="LM_STUDIO_URL")
     LM_TIMEOUT_SECONDS: int = Field(30, env="LM_TIMEOUT_SECONDS")
 
-    class Config:
-        case_sensitive = True
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    # EmailBrain API
+    EMAILBRAIN_API_URL: AnyUrl = Field(
+        "http://127.0.0.1:3901",
+        env="EMAILBRAIN_API_URL",
+    )
+
+    model_config = SettingsConfigDict(
+        case_sensitive=True,
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
 
 
 @lru_cache()

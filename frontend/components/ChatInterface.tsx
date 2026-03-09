@@ -58,12 +58,12 @@ export default function ChatInterface({ selectedAdapter }: ChatInterfaceProps) {
             </h3>
             {selectedAdapter && (
               <p className="mt-1 max-w-2xl text-sm text-gray-500">
-                Using adapter: <span className="font-medium">{selectedAdapter.name}</span>
+                Using adapter: <span className="font-medium">{selectedAdapter.name}</span> via LM Studio
               </p>
             )}
             {!selectedAdapter && (
               <p className="mt-1 max-w-2xl text-sm text-gray-500">
-                No adapter selected - using base model
+                No adapter selected - using the configured base-model provider
               </p>
             )}
           </div>
